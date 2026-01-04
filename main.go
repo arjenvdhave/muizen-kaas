@@ -23,11 +23,14 @@ var images embed.FS
 var sounds embed.FS
 
 const (
-	playerWidth  = 172
-	playerHeight = 210
-	levelLength  = 5000 // Number of tiles in the level
-	cloudWidth   = 14   // How many ground tiles a cloud block takes
-	bushWidth    = 14   // How many ground tiles a bush block takes
+	playerWidth       = 172
+	playerHeight      = 210
+	levelLength       = 5000 // Number of tiles in the level
+	cloudWidth        = 14   // How many ground tiles a cloud block takes
+	bushWidth         = 14   // How many ground tiles a bush block takes
+	obstacleSlotWidth = 3    // How many ground tiles one obstacle takes
+	obstacleMaxLength = 10   // Max number of obstacle slots in a sequence
+	obstacleMaxHeight = 4
 )
 
 // TileType defines the type of a floor tile.
@@ -57,6 +60,15 @@ const (
 	BUSH_2
 )
 
+// ObstacleType defines the type of an obstacle block.
+type ObstacleType int
+
+const (
+	OBSTACLE_EMPTY ObstacleType = iota
+	OBSTACLE_BUILD
+	OBSTACLE_TOP
+)
+
 // FloorTile represents a single tile in the level's floor.
 type FloorTile struct {
 	Type   TileType
@@ -70,27 +82,36 @@ type Camera struct {
 	Y float64
 }
 
+// ObstacleBlock represents a single block in an obstacle formation.
+type ObstacleBlock struct {
+	Type    ObstacleType
+	OffsetX float64
+}
+
 type Game struct {
-	playerX           float32
-	playerY           float32
-	playerDy          float32 // Vertical speed (Delta Y)
-	width             int
-	height            int
-	spriteSheet       *ebiten.Image
-	groundSprite      *ebiten.Image
-	groundSprite2     *ebiten.Image
-	level             []FloorTile // The pre-generated level data
-	camera            Camera
-	playerSprites     map[string]*ebiten.Image
-	playerFacingRight bool
-	audioContext      *audio.Context
-	jumpSound         *audio.Player
-	walkSound         *audio.Player
-	cloudSprites      []*ebiten.Image
-	skyLayer1         []CloudType
-	skyLayer2         []CloudType
-	bushSprites       []*ebiten.Image
-	bushLayer         []BushType
+	playerX             float32
+	playerY             float32
+	playerDy            float32 // Vertical speed (Delta Y)
+	width               int
+	height              int
+	spriteSheet         *ebiten.Image
+	groundSprite        *ebiten.Image
+	groundSprite2       *ebiten.Image
+	level               []FloorTile // The pre-generated level data
+	camera              Camera
+	playerSprites       map[string]*ebiten.Image
+	playerFacingRight   bool
+	audioContext        *audio.Context
+	jumpSound           *audio.Player
+	walkSound           *audio.Player
+	cloudSprites        []*ebiten.Image
+	skyLayer1           []CloudType
+	skyLayer2           []CloudType
+	bushSprites         []*ebiten.Image
+	bushLayer           []BushType
+	obstacleBuildSprite *ebiten.Image
+	obstacleTopSprite   *ebiten.Image
+	obstacles           [][]ObstacleBlock // 2D grid for obstacles
 }
 
 func (g *Game) generateLevel() {
@@ -142,7 +163,7 @@ func (g *Game) generateBushes() {
 	g.bushLayer = make([]BushType, levelLength)
 	i := 0
 	for i < len(g.bushLayer) {
-		if rand.Float64() < 0.15 { // 15% chance to place a bush
+		if rand.Float64() < 0.15 {
 			if i+bushWidth+20 < len(g.bushLayer) {
 				bushChoice := BushType(rand.Intn(len(g.bushSprites)) + 1)
 				g.bushLayer[i] = bushChoice
@@ -156,11 +177,119 @@ func (g *Game) generateBushes() {
 	}
 }
 
+func (g *Game) generateObstacles() {
+	// Using a 2D slice for obstacles: [x][y]
+	// x is in ground tile units
+	g.obstacles = make([][]ObstacleBlock, levelLength)
+	for i := range g.obstacles {
+		g.obstacles[i] = make([]ObstacleBlock, obstacleMaxHeight)
+	}
+
+	// Work in slots of obstacleSlotWidth ground tiles
+	numSlots := levelLength / obstacleSlotWidth
+	slot := 0
+
+	for slot < numSlots {
+		// Chance to start an obstacle sequence
+		if rand.Float64() < 0.2 {
+			sequenceLength := rand.Intn(obstacleMaxLength) + 1
+
+			if slot+sequenceLength >= numSlots {
+				break // Not enough space
+			}
+
+			// First obstacle must be height 1
+			previousHeight := 1
+
+			// Place obstacles in each slot of the sequence
+			for seqIdx := 0; seqIdx < sequenceLength; seqIdx++ {
+				currentSlot := slot + seqIdx
+				tileIndex := currentSlot * obstacleSlotWidth
+
+				// Determine height for this obstacle
+				var currentHeight int
+
+				if seqIdx == 0 {
+					// First obstacle is always height 1
+					currentHeight = 1
+				} else {
+					// Check how many times the same height appears by looking back in obstacles array
+					sameHeightCount := 0
+					checkIndex := tileIndex - obstacleSlotWidth
+
+					// Look back max 2 slots (to check for 2 consecutive same heights)
+					for i := 0; i < 2 && checkIndex >= 0; i++ {
+						// Count how many blocks in this column (that's the height)
+						prevHeight := 0
+						for y := 0; y < obstacleMaxHeight; y++ {
+							if g.obstacles[checkIndex][y].Type != OBSTACLE_EMPTY {
+								prevHeight = y + 1
+							}
+						}
+
+						if prevHeight == previousHeight && prevHeight > 0 {
+							sameHeightCount++
+							checkIndex -= obstacleSlotWidth
+						} else {
+							break
+						}
+					}
+
+					// If we already had same height twice, force change
+					if sameHeightCount >= 2 {
+						// Must go up or down
+						if previousHeight < obstacleMaxHeight && rand.Float64() < 0.5 {
+							currentHeight = previousHeight + 1
+						} else if previousHeight > 1 {
+							currentHeight = rand.Intn(previousHeight-1) + 1
+						} else {
+							currentHeight = previousHeight + 1
+						}
+					} else {
+						// Random choice: go up (+1), stay same, or go down
+						choice := rand.Float64()
+						if choice < 0.3 && previousHeight < obstacleMaxHeight {
+							// Go up by 1
+							currentHeight = previousHeight + 1
+						} else if choice < 0.6 {
+							// Stay same height
+							currentHeight = previousHeight
+						} else {
+							// Go down (can be any amount, but min 1)
+							if previousHeight > 1 {
+								currentHeight = rand.Intn(previousHeight) + 1
+							} else {
+								currentHeight = 1
+							}
+						}
+					}
+				}
+
+				// Build the obstacle column at this tile position
+				for y := 0; y < currentHeight; y++ {
+					if y == currentHeight-1 {
+						g.obstacles[tileIndex][y] = ObstacleBlock{Type: OBSTACLE_TOP}
+					} else {
+						g.obstacles[tileIndex][y] = ObstacleBlock{Type: OBSTACLE_BUILD, OffsetX: 10}
+					}
+				}
+
+				previousHeight = currentHeight
+			}
+
+			// Move past this sequence and add a gap
+			slot += sequenceLength + 3 // 3 slot gap between sequences
+		} else {
+			slot++
+		}
+	}
+}
+
 func (g *Game) Update() error {
 	const (
 		speed     = 4.0
 		gravity   = 0.6
-		jumpPower = 10.0
+		jumpPower = 15.0
 	)
 	groundLevel := float32(g.height - g.groundSprite.Bounds().Dy())
 
@@ -193,7 +322,7 @@ func (g *Game) Update() error {
 	g.playerDy += gravity
 	g.playerY += g.playerDy
 
-	// 3. Resolve Collisions
+	// 3. Resolve Collisions (TODO: Add obstacle collision)
 	if g.playerY+playerHeight > groundLevel {
 		g.playerY = groundLevel - playerHeight
 		g.playerDy = 0
@@ -229,6 +358,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	drawSkyLayer(screen, g, g.skyLayer1, 90)
 
 	drawBushes(screen, g)
+	drawObstacles(screen, g) // Draw obstacles behind the player/ground
+
 	drawPlayer(screen, g)
 	drawGround(screen, g)
 
@@ -265,16 +396,13 @@ func drawSkyLayer(screen *ebiten.Image, g *Game, layer []CloudType, yPos float64
 func drawBushes(screen *ebiten.Image, g *Game) {
 	groundW := g.groundSprite.Bounds().Dx()
 	groundLevel := float64(g.height - g.groundSprite.Bounds().Dy())
-
-	const preRenderBuffer = 640 // Wider than the widest bush (612px)
+	const preRenderBuffer = 640
 	startPixel := g.camera.X - preRenderBuffer
 	startIndex := int(startPixel) / groundW
-
 	if startIndex < 0 {
 		startIndex = 0
 	}
 	tileCount := (g.width+preRenderBuffer)/groundW + 2
-
 	for i := 0; i < tileCount; i++ {
 		tileIndex := startIndex + i
 		if tileIndex >= len(g.bushLayer) {
@@ -286,12 +414,49 @@ func drawBushes(screen *ebiten.Image, g *Game) {
 			op := &ebiten.DrawImageOptions{}
 			worldX := float64(tileIndex * groundW)
 			screenX := worldX - g.camera.X
-
-			// Position bush on the ground
 			yPos := groundLevel - float64(bushSprite.Bounds().Dy())
-
 			op.GeoM.Translate(screenX, yPos)
 			screen.DrawImage(bushSprite, op)
+		}
+	}
+}
+
+func drawObstacles(screen *ebiten.Image, g *Game) {
+	groundW := g.groundSprite.Bounds().Dx()
+	blockH := g.obstacleTopSprite.Bounds().Dy()
+	groundLevel := float64(g.height - g.groundSprite.Bounds().Dy())
+
+	const preRenderBuffer = 640
+	startPixel := g.camera.X - preRenderBuffer
+	startIndex := int(startPixel) / groundW
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	tileCount := (g.width+preRenderBuffer)/groundW + 2
+
+	for i := 0; i < tileCount; i++ {
+		tileIndex := startIndex + i
+		if tileIndex >= len(g.obstacles) {
+			break
+		}
+
+		for y, block := range g.obstacles[tileIndex] {
+			if block.Type != OBSTACLE_EMPTY {
+				var sprite *ebiten.Image
+				if block.Type == OBSTACLE_TOP {
+					sprite = g.obstacleTopSprite
+				} else {
+					sprite = g.obstacleBuildSprite
+				}
+
+				op := &ebiten.DrawImageOptions{}
+				worldX := float64(tileIndex * groundW)
+				screenX := worldX - g.camera.X
+				yPos := groundLevel - float64((y+1)*blockH)
+
+				op.GeoM.Translate(screenX+block.OffsetX, yPos)
+				screen.DrawImage(sprite, op)
+			}
 		}
 	}
 }
@@ -352,6 +517,7 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	audioContext := audio.NewContext(44100)
+	// ... (Audio loading remains the same)
 	soundFile, err := sounds.Open("sounds/jump.mp3")
 	if err != nil {
 		log.Fatal(err)
@@ -364,7 +530,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	walkFile, err := sounds.Open("sounds/walk.mp3")
 	if err != nil {
 		log.Fatal(err)
@@ -402,29 +567,35 @@ func main() {
 	bushSprites[0] = spriteSheet.SubImage(image.Rect(939, 1190, 939+608, 1190+239)).(*ebiten.Image)
 	bushSprites[1] = spriteSheet.SubImage(image.Rect(248, 1172, 248+612, 1172+257)).(*ebiten.Image)
 
+	obstacleBuildSprite := spriteSheet.SubImage(image.Rect(379, 380, 379+120, 380+130)).(*ebiten.Image)
+	obstacleTopSprite := spriteSheet.SubImage(image.Rect(246, 380, 246+130, 380+130)).(*ebiten.Image)
+
 	ebiten.SetWindowSize(640, 480)
 	ebiten.SetWindowTitle("Muizen Kaas")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetFullscreen(true)
 
 	game := &Game{
-		playerX:           0,
-		playerY:           float32(480 - groundSprite.Bounds().Dy() - playerHeight),
-		spriteSheet:       spriteSheet,
-		groundSprite:      groundSprite,
-		groundSprite2:     groundSprite2,
-		playerSprites:     playerSprites,
-		playerFacingRight: true,
-		audioContext:      audioContext,
-		jumpSound:         jumpPlayer,
-		walkSound:         walkPlayer,
-		cloudSprites:      cloudSprites,
-		bushSprites:       bushSprites,
+		playerX:             0,
+		playerY:             float32(480 - groundSprite.Bounds().Dy() - playerHeight),
+		spriteSheet:         spriteSheet,
+		groundSprite:        groundSprite,
+		groundSprite2:       groundSprite2,
+		playerSprites:       playerSprites,
+		playerFacingRight:   true,
+		audioContext:        audioContext,
+		jumpSound:           jumpPlayer,
+		walkSound:           walkPlayer,
+		cloudSprites:        cloudSprites,
+		bushSprites:         bushSprites,
+		obstacleBuildSprite: obstacleBuildSprite,
+		obstacleTopSprite:   obstacleTopSprite,
 	}
 
 	game.generateLevel()
 	game.generateSky()
 	game.generateBushes()
+	game.generateObstacles()
 
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
