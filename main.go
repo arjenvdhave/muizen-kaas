@@ -13,6 +13,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/audio/mp3"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 //go:embed sprites/*.png
@@ -24,6 +25,9 @@ var sounds embed.FS
 const (
 	playerWidth  = 172
 	playerHeight = 210
+	levelLength  = 5000 // Number of tiles in the level
+	cloudWidth   = 14   // How many ground tiles a cloud block takes
+	bushWidth    = 14   // How many ground tiles a bush block takes
 )
 
 // TileType defines the type of a floor tile.
@@ -32,6 +36,25 @@ type TileType int
 const (
 	TILE_NORMAL TileType = iota
 	TILE_LEAF
+)
+
+// CloudType defines the type of a sky tile. 0 is empty.
+type CloudType int
+
+const (
+	CLOUD_EMPTY CloudType = iota
+	CLOUD_1
+	CLOUD_2
+	CLOUD_3
+)
+
+// BushType defines the type of a bush tile. 0 is empty.
+type BushType int
+
+const (
+	BUSH_EMPTY BushType = iota
+	BUSH_1
+	BUSH_2
 )
 
 // FloorTile represents a single tile in the level's floor.
@@ -63,15 +86,20 @@ type Game struct {
 	audioContext      *audio.Context
 	jumpSound         *audio.Player
 	walkSound         *audio.Player
+	cloudSprites      []*ebiten.Image
+	skyLayer1         []CloudType
+	skyLayer2         []CloudType
+	bushSprites       []*ebiten.Image
+	bushLayer         []BushType
 }
 
 func (g *Game) generateLevel() {
-	g.level = make([]FloorTile, 5000)
+	g.level = make([]FloorTile, levelLength)
 	groundW := g.groundSprite.Bounds().Dx()
 	groundH := g.groundSprite.Bounds().Dy()
 	groundH2 := g.groundSprite2.Bounds().Dy()
 
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < levelLength; i++ {
 		tileType := TILE_NORMAL
 		height := groundH
 		if rand.Float64() < 0.2 {
@@ -86,8 +114,49 @@ func (g *Game) generateLevel() {
 	}
 }
 
+func (g *Game) populateSkyLayer(layer []CloudType, cloudBlockWidth, minEmptyBlocks int) {
+	i := 0
+	for i < len(layer) {
+		if rand.Float64() < 0.1 {
+			if i+cloudBlockWidth+minEmptyBlocks < len(layer) {
+				cloudChoice := CloudType(rand.Intn(len(g.cloudSprites)) + 1)
+				layer[i] = cloudChoice
+				i += cloudBlockWidth + minEmptyBlocks
+			} else {
+				i++
+			}
+		} else {
+			i++
+		}
+	}
+}
+
+func (g *Game) generateSky() {
+	g.skyLayer1 = make([]CloudType, levelLength)
+	g.skyLayer2 = make([]CloudType, levelLength)
+	g.populateSkyLayer(g.skyLayer1, cloudWidth, 5)
+	g.populateSkyLayer(g.skyLayer2, cloudWidth, 25)
+}
+
+func (g *Game) generateBushes() {
+	g.bushLayer = make([]BushType, levelLength)
+	i := 0
+	for i < len(g.bushLayer) {
+		if rand.Float64() < 0.15 { // 15% chance to place a bush
+			if i+bushWidth+20 < len(g.bushLayer) {
+				bushChoice := BushType(rand.Intn(len(g.bushSprites)) + 1)
+				g.bushLayer[i] = bushChoice
+				i += bushWidth + 20
+			} else {
+				i++
+			}
+		} else {
+			i++
+		}
+	}
+}
+
 func (g *Game) Update() error {
-	// --- Constants for physics ---
 	const (
 		speed     = 4.0
 		gravity   = 0.6
@@ -104,7 +173,7 @@ func (g *Game) Update() error {
 		g.playerX += speed
 		g.playerFacingRight = true
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+	if inpututil.IsKeyJustPressed(ebiten.KeySpace) || inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
 		if g.playerDy == 0 {
 			g.playerDy = -jumpPower
 			g.jumpSound.Rewind()
@@ -132,8 +201,9 @@ func (g *Game) Update() error {
 	if g.playerX < 0 {
 		g.playerX = 0
 	}
-	if g.playerX > float32(5000*53-playerWidth) {
-		g.playerX = float32(5000*53 - playerWidth)
+	groundW := g.groundSprite.Bounds().Dx()
+	if g.playerX > float32(levelLength*groundW-playerWidth) {
+		g.playerX = float32(levelLength*groundW - playerWidth)
 	}
 
 	// 4. Update Camera
@@ -141,7 +211,7 @@ func (g *Game) Update() error {
 	if g.camera.X < 0 {
 		g.camera.X = 0
 	}
-	levelWidth := float64(len(g.level) * g.groundSprite.Bounds().Dx())
+	levelWidth := float64(len(g.level) * groundW)
 	maxCameraX := levelWidth - float64(g.width)
 	if g.camera.X > maxCameraX {
 		g.camera.X = maxCameraX
@@ -155,8 +225,79 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.width = screen.Bounds().Dx()
 	g.height = screen.Bounds().Dy()
 
-	playerScreenX := float32(g.playerX) - float32(g.camera.X)
+	drawSkyLayer(screen, g, g.skyLayer2, 120)
+	drawSkyLayer(screen, g, g.skyLayer1, 90)
 
+	drawBushes(screen, g)
+	drawPlayer(screen, g)
+	drawGround(screen, g)
+
+	barColor := color.RGBA{R: 0xDA, G: 0x9E, B: 0x61, A: 0xFF}
+	vector.DrawFilledRect(screen, 0, 0, float32(g.width), 80, barColor, false)
+}
+
+func drawSkyLayer(screen *ebiten.Image, g *Game, layer []CloudType, yPos float64) {
+	groundW := g.groundSprite.Bounds().Dx()
+	const preRenderBuffer = 640
+	startPixel := g.camera.X - preRenderBuffer
+	startIndex := int(startPixel) / groundW
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	tileCount := (g.width+preRenderBuffer)/groundW + 2
+	for i := 0; i < tileCount; i++ {
+		tileIndex := startIndex + i
+		if tileIndex >= len(layer) {
+			break
+		}
+		cloudType := layer[tileIndex]
+		if cloudType != CLOUD_EMPTY {
+			cloudSprite := g.cloudSprites[cloudType-1]
+			op := &ebiten.DrawImageOptions{}
+			worldX := float64(tileIndex * groundW)
+			screenX := worldX - g.camera.X
+			op.GeoM.Translate(screenX, yPos)
+			screen.DrawImage(cloudSprite, op)
+		}
+	}
+}
+
+func drawBushes(screen *ebiten.Image, g *Game) {
+	groundW := g.groundSprite.Bounds().Dx()
+	groundLevel := float64(g.height - g.groundSprite.Bounds().Dy())
+
+	const preRenderBuffer = 640 // Wider than the widest bush (612px)
+	startPixel := g.camera.X - preRenderBuffer
+	startIndex := int(startPixel) / groundW
+
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	tileCount := (g.width+preRenderBuffer)/groundW + 2
+
+	for i := 0; i < tileCount; i++ {
+		tileIndex := startIndex + i
+		if tileIndex >= len(g.bushLayer) {
+			break
+		}
+		bushType := g.bushLayer[tileIndex]
+		if bushType != BUSH_EMPTY {
+			bushSprite := g.bushSprites[bushType-1]
+			op := &ebiten.DrawImageOptions{}
+			worldX := float64(tileIndex * groundW)
+			screenX := worldX - g.camera.X
+
+			// Position bush on the ground
+			yPos := groundLevel - float64(bushSprite.Bounds().Dy())
+
+			op.GeoM.Translate(screenX, yPos)
+			screen.DrawImage(bushSprite, op)
+		}
+	}
+}
+
+func drawPlayer(screen *ebiten.Image, g *Game) {
+	playerScreenX := float32(g.playerX) - float32(g.camera.X)
 	var playerSprite *ebiten.Image
 	if g.playerDy != 0 {
 		if g.playerFacingRight {
@@ -173,14 +314,16 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 	playerOp := &ebiten.DrawImageOptions{}
 	playerOp.GeoM.Translate(float64(playerScreenX), float64(g.playerY))
+	screen.DrawImage(playerSprite, playerOp)
+}
 
+func drawGround(screen *ebiten.Image, g *Game) {
 	groundW := g.groundSprite.Bounds().Dx()
 	startIndex := int(g.camera.X) / groundW
 	if startIndex < 0 {
 		startIndex = 0
 	}
 	tileCount := g.width/groundW + 2
-
 	for i := 0; i < tileCount; i++ {
 		tileIndex := startIndex + i
 		if tileIndex >= len(g.level) {
@@ -199,8 +342,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		op.GeoM.Translate(screenX, float64(g.height-tileData.Height))
 		screen.DrawImage(tileImage, op)
 	}
-
-	screen.DrawImage(playerSprite, playerOp)
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
@@ -224,7 +365,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Load walk sound
 	walkFile, err := sounds.Open("sounds/walk.mp3")
 	if err != nil {
 		log.Fatal(err)
@@ -253,6 +393,15 @@ func main() {
 	playerSprites["jump_right"] = spriteSheet.SubImage(image.Rect(861, 1714, 861+playerWidth, 1714+playerHeight)).(*ebiten.Image)
 	playerSprites["jump_left"] = spriteSheet.SubImage(image.Rect(1318, 1714, 1318+playerWidth, 1714+playerHeight)).(*ebiten.Image)
 
+	cloudSprites := make([]*ebiten.Image, 3)
+	cloudSprites[0] = spriteSheet.SubImage(image.Rect(85, 776, 85+608, 776+324)).(*ebiten.Image)
+	cloudSprites[1] = spriteSheet.SubImage(image.Rect(739, 836, 739+412, 836+212)).(*ebiten.Image)
+	cloudSprites[2] = spriteSheet.SubImage(image.Rect(1208, 848, 1208+383, 848+180)).(*ebiten.Image)
+
+	bushSprites := make([]*ebiten.Image, 2)
+	bushSprites[0] = spriteSheet.SubImage(image.Rect(939, 1190, 939+608, 1190+239)).(*ebiten.Image)
+	bushSprites[1] = spriteSheet.SubImage(image.Rect(248, 1172, 248+612, 1172+257)).(*ebiten.Image)
+
 	ebiten.SetWindowSize(640, 480)
 	ebiten.SetWindowTitle("Muizen Kaas")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
@@ -269,9 +418,13 @@ func main() {
 		audioContext:      audioContext,
 		jumpSound:         jumpPlayer,
 		walkSound:         walkPlayer,
+		cloudSprites:      cloudSprites,
+		bushSprites:       bushSprites,
 	}
 
 	game.generateLevel()
+	game.generateSky()
+	game.generateBushes()
 
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
