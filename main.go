@@ -322,15 +322,96 @@ func (g *Game) Update() error {
 	g.playerDy += gravity
 	g.playerY += g.playerDy
 
-	// 3. Resolve Collisions (TODO: Add obstacle collision)
-	if g.playerY+playerHeight > groundLevel {
+	// 3. Resolve Collisions
+	groundW := g.groundSprite.Bounds().Dx()
+	blockH := float32(g.obstacleTopSprite.Bounds().Dy())
+	blockW := float32(g.obstacleTopSprite.Bounds().Dx())
+
+	// Check collision with obstacles
+	playerLeft := g.playerX
+	playerRight := g.playerX + playerWidth
+	playerTop := g.playerY
+	playerBottom := g.playerY + playerHeight
+
+	onObstacle := false
+
+	// Check tiles the player overlaps with
+	startTile := int(playerLeft) / groundW
+	endTile := int(playerRight) / groundW
+
+	for tileIdx := startTile; tileIdx <= endTile && tileIdx < len(g.obstacles); tileIdx++ {
+		if tileIdx < 0 {
+			continue
+		}
+
+		for y := 0; y < obstacleMaxHeight; y++ {
+			if g.obstacles[tileIdx][y].Type != OBSTACLE_EMPTY {
+				// Calculate obstacle bounds
+				obstacleLeft := float32(tileIdx*groundW) + float32(g.obstacles[tileIdx][y].OffsetX)
+				obstacleRight := obstacleLeft + blockW
+				obstacleTop := groundLevel - float32((y+1)*int(blockH))
+				obstacleBottom := obstacleTop + blockH
+
+				// Check if player overlaps with this obstacle block
+				if playerRight > obstacleLeft && playerLeft < obstacleRight &&
+					playerBottom > obstacleTop && playerTop < obstacleBottom {
+
+					// Determine collision direction and resolve
+					overlapLeft := playerRight - obstacleLeft
+					overlapRight := obstacleRight - playerLeft
+					overlapTop := playerBottom - obstacleTop
+					overlapBottom := obstacleBottom - playerTop
+
+					// Find minimum overlap to determine collision side
+					minOverlap := overlapLeft
+					collisionSide := "left"
+
+					if overlapRight < minOverlap {
+						minOverlap = overlapRight
+						collisionSide = "right"
+					}
+					if overlapTop < minOverlap {
+						minOverlap = overlapTop
+						collisionSide = "top"
+					}
+					if overlapBottom < minOverlap {
+						minOverlap = overlapBottom
+						collisionSide = "bottom"
+					}
+
+					// Resolve collision based on side
+					switch collisionSide {
+					case "top":
+						// Player landed on top of obstacle
+						g.playerY = obstacleTop - playerHeight
+						g.playerDy = 0
+						onObstacle = true
+					case "bottom":
+						// Player hit bottom of obstacle (head bump)
+						g.playerY = obstacleBottom
+						g.playerDy = 0
+					case "left":
+						// Player hit left side
+						g.playerX = obstacleLeft - playerWidth
+					case "right":
+						// Player hit right side
+						g.playerX = obstacleRight
+					}
+				}
+			}
+		}
+	}
+
+	// Ground collision (only if not on obstacle)
+	if !onObstacle && g.playerY+playerHeight > groundLevel {
 		g.playerY = groundLevel - playerHeight
 		g.playerDy = 0
 	}
+
+	// Screen boundaries
 	if g.playerX < 0 {
 		g.playerX = 0
 	}
-	groundW := g.groundSprite.Bounds().Dx()
 	if g.playerX > float32(levelLength*groundW-playerWidth) {
 		g.playerX = float32(levelLength*groundW - playerWidth)
 	}
